@@ -8,6 +8,9 @@ import { registerListsTools } from './tools/lists.js';
 import { registerCardsTools } from './tools/cards.js';
 import { registerLabelsTools } from './tools/labels.js';
 import { registerActionsTools } from './tools/actions.js';
+import { registerOrganizationsTools } from './tools/organizations.js';
+import { registerMembersTools } from './tools/members.js';
+import { registerChecklistsTools } from './tools/checklists.js';
 
 // Import types
 import { TrelloCredentials } from './types/common.js';
@@ -91,6 +94,9 @@ registerListsTools(server, credentials);
 registerCardsTools(server, credentials);
 registerLabelsTools(server, credentials);
 registerActionsTools(server, credentials);
+registerOrganizationsTools(server, credentials);
+registerMembersTools(server, credentials);
+registerChecklistsTools(server, credentials);
 
 // Connect to stdio transport
 const transport = new StdioServerTransport();

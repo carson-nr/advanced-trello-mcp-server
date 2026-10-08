@@ -138,8 +138,15 @@ export function registerCardsTools(server: McpServer, credentials: TrelloCredent
 			cardId: z.string().describe('ID of the card to update'),
 			description: z.string().optional().describe('New description for the card (replaces existing). Use empty string to clear.'),
 			name: z.string().optional().describe('New name/title for the card'),
+			due: z.string().optional().describe('Due date in ISO 8601 format (e.g. 2025-03-12 or 2025-03-12T18:30:00.000Z)'),
+			start: z.string().optional().describe('Start date in ISO 8601 format'),
+			dueComplete: z.boolean().optional().describe('Whether the due date is marked complete'),
+			idLabels: z.string().optional().describe('Comma-separated list of label IDs to set on the card'),
+			idMembers: z.string().optional().describe('Comma-separated list of member IDs to assign to the card'),
+			pos: z.union([z.string(), z.number()]).optional().describe('Position in the list (e.g. "top", "bottom", or a number)'),
+			closed: z.boolean().optional().describe('Close (archive) or reopen the card'),
 		},
-		async ({ cardId, description, name }) => {
+		async ({ cardId, description, name, due, start, dueComplete, idLabels, idMembers, pos, closed }) => {
 			try {
 				if (!credentials.apiKey || !credentials.apiToken) {
 					return {
@@ -153,16 +160,23 @@ export function registerCardsTools(server: McpServer, credentials: TrelloCredent
 					};
 				}
 
-				const body: { desc?: string; name?: string } = {};
+				const body: Record<string, unknown> = {};
 				if (description !== undefined) body.desc = description;
 				if (name !== undefined) body.name = name;
+				if (due !== undefined) body.due = due;
+				if (start !== undefined) body.start = start;
+				if (dueComplete !== undefined) body.dueComplete = dueComplete;
+				if (idLabels !== undefined) body.idLabels = idLabels;
+				if (idMembers !== undefined) body.idMembers = idMembers;
+				if (pos !== undefined) body.pos = pos;
+				if (closed !== undefined) body.closed = closed;
 
 				if (Object.keys(body).length === 0) {
 					return {
 						content: [
 							{
 								type: 'text',
-								text: 'At least one of description or name must be provided',
+								text: 'At least one update parameter must be provided',
 							},
 						],
 						isError: true,
@@ -440,6 +454,52 @@ export function registerCardsTools(server: McpServer, credentials: TrelloCredent
 							text: `Error adding comments: ${error}`,
 						},
 					],
+					isError: true,
+				};
+			}
+		}
+	);
+
+	// GET /boards/{boardId}/cards → filter by idShort
+	server.tool(
+		'get-card-by-short-id',
+		{
+			boardId: z.string().describe('ID of the board to search'),
+			shortId: z.number().describe('The numeric short ID of the card (the ### in the {PREFIX}-### card name)'),
+		},
+		async ({ boardId, shortId }) => {
+			try {
+				if (!credentials.apiKey || !credentials.apiToken) {
+					return {
+						content: [{ type: 'text' as const, text: 'Trello API credentials are not configured' }],
+						isError: true,
+					};
+				}
+
+				const url = new URL(`https://api.trello.com/1/boards/${boardId}/cards`);
+				url.searchParams.append('key', credentials.apiKey);
+				url.searchParams.append('token', credentials.apiToken);
+				url.searchParams.append('fields', 'id,idShort,name,shortLink,shortUrl,url,desc,idList,labels,closed');
+				url.searchParams.append('filter', 'all');
+
+				const response = await fetchWithRetry(url.toString());
+				const cards = await response.json();
+
+				const match = cards.find((c: any) => c.idShort === shortId);
+
+				if (!match) {
+					return {
+						content: [{ type: 'text' as const, text: `No card found with idShort ${shortId} on board ${boardId}` }],
+						isError: true,
+					};
+				}
+
+				return {
+					content: [{ type: 'text' as const, text: JSON.stringify(match) }],
+				};
+			} catch (error) {
+				return {
+					content: [{ type: 'text' as const, text: `Error looking up card by short ID: ${error}` }],
 					isError: true,
 				};
 			}
@@ -790,6 +850,410 @@ export function registerCardsTools(server: McpServer, credentials: TrelloCredent
 				};
 			} catch (error) {
 				return { content: [{ type: 'text' as const, text: `Error downloading attachments: ${error}` }], isError: true };
+			}
+		}
+	);
+
+	// GET /cards/{id} - Get a single card
+	server.tool(
+		'get-card',
+		{
+			cardId: z.string().describe('ID of the card'),
+			fields: z.string().optional().describe('Comma-separated list of fields to include. Default: "id,idShort,name,desc,url,closed,idList,labels,due,start,dueComplete,idMembers,pos"'),
+		},
+		async (params) => {
+			try {
+				const fields = params.fields || 'id,idShort,name,desc,url,closed,idList,labels,due,start,dueComplete,idMembers,pos';
+
+				const queryParams = new URLSearchParams({
+					key: credentials.apiKey,
+					token: credentials.apiToken,
+					fields,
+				});
+
+				const response = await fetchWithRetry(
+					`https://api.trello.com/1/cards/${params.cardId}?${queryParams}`
+				);
+				const data = await response.json();
+
+				return {
+					content: [
+						{
+							type: 'text',
+							text: JSON.stringify(data, null, 2),
+						},
+					],
+				};
+			} catch (error) {
+				return {
+					content: [
+						{
+							type: 'text',
+							text: `Error getting card: ${error}`,
+						},
+					],
+					isError: true,
+				};
+			}
+		}
+	);
+
+	// POST /cards - Copy a card
+	server.tool(
+		'copy-card',
+		{
+			idCardSource: z.string().describe('ID of the card to copy from'),
+			idList: z.string().describe('ID of the list to create the copy in'),
+			keepFromSource: z.string().optional().describe('What to copy from the source card. Default: "all"'),
+		},
+		async (params) => {
+			try {
+				const keepFromSource = params.keepFromSource || 'all';
+
+				const queryParams = new URLSearchParams({
+					key: credentials.apiKey,
+					token: credentials.apiToken,
+					idCardSource: params.idCardSource,
+					idList: params.idList,
+					keepFromSource,
+				});
+
+				const response = await fetchWithRetry(
+					`https://api.trello.com/1/cards?${queryParams}`,
+					{ method: 'POST' }
+				);
+				const data = await response.json();
+
+				return {
+					content: [
+						{
+							type: 'text',
+							text: JSON.stringify(data, null, 2),
+						},
+					],
+				};
+			} catch (error) {
+				return {
+					content: [
+						{
+							type: 'text',
+							text: `Error copying card: ${error}`,
+						},
+					],
+					isError: true,
+				};
+			}
+		}
+	);
+
+	// DELETE /cards/{id} - Permanently delete a card
+	server.tool(
+		'delete-card',
+		{
+			cardId: z.string().describe('ID of the card to permanently delete'),
+		},
+		async ({ cardId }) => {
+			try {
+				const queryParams = new URLSearchParams({
+					key: credentials.apiKey,
+					token: credentials.apiToken,
+				});
+
+				const response = await fetchWithRetry(
+					`https://api.trello.com/1/cards/${cardId}?${queryParams}`,
+					{ method: 'DELETE' }
+				);
+				const data = await response.json();
+
+				return {
+					content: [
+						{
+							type: 'text',
+							text: JSON.stringify(data, null, 2),
+						},
+					],
+				};
+			} catch (error) {
+				return {
+					content: [
+						{
+							type: 'text',
+							text: `Error deleting card: ${error}`,
+						},
+					],
+					isError: true,
+				};
+			}
+		}
+	);
+
+	// GET /search - Search for cards
+	server.tool(
+		'search',
+		{
+			query: z.string().describe('Search query text'),
+			idBoards: z.string().optional().describe('Comma-separated list of board IDs to scope the search'),
+			modelTypes: z.string().optional().describe('Types of models to search. Default: "cards"'),
+			card_fields: z.string().optional().describe('Comma-separated list of card fields to return'),
+			cards_limit: z.number().optional().describe('Maximum number of cards to return'),
+		},
+		async (params) => {
+			try {
+				const modelTypes = params.modelTypes || 'cards';
+
+				const queryParams = new URLSearchParams({
+					key: credentials.apiKey,
+					token: credentials.apiToken,
+					query: params.query,
+					modelTypes,
+				});
+
+				if (params.idBoards) queryParams.append('idBoards', params.idBoards);
+				if (params.card_fields) queryParams.append('card_fields', params.card_fields);
+				if (params.cards_limit !== undefined) queryParams.append('cards_limit', String(params.cards_limit));
+
+				const response = await fetchWithRetry(
+					`https://api.trello.com/1/search?${queryParams}`
+				);
+				const data = await response.json();
+
+				return {
+					content: [
+						{
+							type: 'text',
+							text: JSON.stringify(data, null, 2),
+						},
+					],
+				};
+			} catch (error) {
+				return {
+					content: [
+						{
+							type: 'text',
+							text: `Error searching: ${error}`,
+						},
+					],
+					isError: true,
+				};
+			}
+		}
+	);
+
+	// POST /cards/{id}/attachments - Add a URL attachment to a card
+	server.tool(
+		'add-attachment',
+		{
+			cardId: z.string().describe('ID of the card'),
+			url: z.string().describe('URL to attach'),
+			name: z.string().optional().describe('Display name for the attachment'),
+		},
+		async (params) => {
+			try {
+				const queryParams = new URLSearchParams({
+					key: credentials.apiKey,
+					token: credentials.apiToken,
+					url: params.url,
+				});
+
+				if (params.name) queryParams.append('name', params.name);
+
+				const response = await fetchWithRetry(
+					`https://api.trello.com/1/cards/${params.cardId}/attachments?${queryParams}`,
+					{ method: 'POST' }
+				);
+				const data = await response.json();
+
+				return {
+					content: [
+						{
+							type: 'text',
+							text: JSON.stringify(data, null, 2),
+						},
+					],
+				};
+			} catch (error) {
+				return {
+					content: [
+						{
+							type: 'text',
+							text: `Error adding attachment: ${error}`,
+						},
+					],
+					isError: true,
+				};
+			}
+		}
+	);
+
+	// DELETE /cards/{id}/attachments/{idAttachment} - Delete an attachment
+	server.tool(
+		'delete-attachment',
+		{
+			cardId: z.string().describe('ID of the card'),
+			attachmentId: z.string().describe('ID of the attachment to delete'),
+		},
+		async ({ cardId, attachmentId }) => {
+			try {
+				const queryParams = new URLSearchParams({
+					key: credentials.apiKey,
+					token: credentials.apiToken,
+				});
+
+				const response = await fetchWithRetry(
+					`https://api.trello.com/1/cards/${cardId}/attachments/${attachmentId}?${queryParams}`,
+					{ method: 'DELETE' }
+				);
+				const data = await response.json();
+
+				return {
+					content: [
+						{
+							type: 'text',
+							text: JSON.stringify(data, null, 2),
+						},
+					],
+				};
+			} catch (error) {
+				return {
+					content: [
+						{
+							type: 'text',
+							text: `Error deleting attachment: ${error}`,
+						},
+					],
+					isError: true,
+				};
+			}
+		}
+	);
+
+	// GET /cards/{id}/actions?filter=commentCard - Get comments on a card
+	server.tool(
+		'get-card-comments',
+		{
+			cardId: z.string().describe('ID of the card'),
+		},
+		async ({ cardId }) => {
+			try {
+				const queryParams = new URLSearchParams({
+					key: credentials.apiKey,
+					token: credentials.apiToken,
+					filter: 'commentCard',
+					fields: 'id,type,date,data,memberCreator',
+				});
+
+				const response = await fetchWithRetry(
+					`https://api.trello.com/1/cards/${cardId}/actions?${queryParams}`
+				);
+				const data = await response.json();
+
+				return {
+					content: [
+						{
+							type: 'text',
+							text: JSON.stringify({
+								comments: data,
+								count: Array.isArray(data) ? data.length : 0,
+							}, null, 2),
+						},
+					],
+				};
+			} catch (error) {
+				return {
+					content: [
+						{
+							type: 'text',
+							text: `Error getting card comments: ${error}`,
+						},
+					],
+					isError: true,
+				};
+			}
+		}
+	);
+
+	// PUT /cards/{id}/actions/{idAction}/comments - Update a comment
+	server.tool(
+		'update-comment',
+		{
+			cardId: z.string().describe('ID of the card'),
+			actionId: z.string().describe('ID of the comment action to update'),
+			text: z.string().describe('New comment text'),
+		},
+		async ({ cardId, actionId, text }) => {
+			try {
+				const queryParams = new URLSearchParams({
+					key: credentials.apiKey,
+					token: credentials.apiToken,
+					value: text,
+				});
+
+				const response = await fetchWithRetry(
+					`https://api.trello.com/1/cards/${cardId}/actions/${actionId}/comments?${queryParams}`,
+					{ method: 'PUT' }
+				);
+				const data = await response.json();
+
+				return {
+					content: [
+						{
+							type: 'text',
+							text: JSON.stringify(data, null, 2),
+						},
+					],
+				};
+			} catch (error) {
+				return {
+					content: [
+						{
+							type: 'text',
+							text: `Error updating comment: ${error}`,
+						},
+					],
+					isError: true,
+				};
+			}
+		}
+	);
+
+	// DELETE /cards/{id}/actions/{idAction}/comments - Delete a comment
+	server.tool(
+		'delete-comment',
+		{
+			cardId: z.string().describe('ID of the card'),
+			actionId: z.string().describe('ID of the comment action to delete'),
+		},
+		async ({ cardId, actionId }) => {
+			try {
+				const queryParams = new URLSearchParams({
+					key: credentials.apiKey,
+					token: credentials.apiToken,
+				});
+
+				const response = await fetchWithRetry(
+					`https://api.trello.com/1/cards/${cardId}/actions/${actionId}/comments?${queryParams}`,
+					{ method: 'DELETE' }
+				);
+				const data = await response.json();
+
+				return {
+					content: [
+						{
+							type: 'text',
+							text: JSON.stringify(data, null, 2),
+						},
+					],
+				};
+			} catch (error) {
+				return {
+					content: [
+						{
+							type: 'text',
+							text: `Error deleting comment: ${error}`,
+						},
+					],
+					isError: true,
+				};
 			}
 		}
 	);
